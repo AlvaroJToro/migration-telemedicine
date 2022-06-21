@@ -23,7 +23,6 @@ const countries = [];
 const languages = [];
 const addresses = [];
 const patients = [];
-const orders = [];
 
 main();
 
@@ -32,10 +31,11 @@ async function main() {
   // await insertLanguages();
   await clearDatabase();
   await insertPatientsAndAddresses();
-  await insertOrders();
+  await insertOrdersAndPrescriptions();
 }
 
 async function clearDatabase() {
+  await localPool.query("DELETE FROM prescriptions");
   await localPool.query("DELETE FROM orders");
   await localPool.query("DELETE FROM patients");
   await localPool.query("DELETE FROM addresses");
@@ -146,7 +146,7 @@ async function insertPatientsAndAddresses() {
   console.log("PATIENTS AND ADDRESSES INSERTED");
 }
 
-async function insertOrders() {
+async function insertOrdersAndPrescriptions() {
   const [qaOrders] = await qaPool.query(`
     SELECT 
       o.id, 0 as order_type, o.order_type as subscription_type,
@@ -157,44 +157,96 @@ async function insertOrders() {
       o.platform_order_id, 
       IF(o.status IN (0, 8), 1, o.status) as status_code,
       IF(o.status IN (4, 1), 2, 1) as questionnaire_status_code,
-      a.answers_json, a.filled_at 
+      a.answers_json, a.filled_at,
+      o.commentClinician as doctor_comments,
+      0 as is_blocking, o.is_sync_review, o.ehr_pdf,
+      o.verification_hellosing as hellosign_reques_code,
+      o.signing_url as hellosign_signing_url,
+      IF(o.fulfillment_status = 'fulfilled', 1, 0) as hellosign_is_completed,
+      o.files_url as hellosign_file_url,
+      IF(a.filled_at is null, 1, 0) as has_answers, o.signed_at,
+      o.created_at, o.created_at  as updated_at,
+      o.variant as variant_id, o.clinicianId as doctor_id, 
+      IF (o.status in (8, 0, 1), 1, 
+        IF (o.status = 4, 3, 2)) as status_code  
     FROM orders o 
     LEFT JOIN (
       SELECT order_id, answers_json, MAX(order_id), filled_at 
       FROM answers
       GROUP BY order_id
     ) a
-    on a.order_id  = o.platform_order_id
+    ON a.order_id  = o.platform_order_id
     WHERE o.status NOT IN (10, 12)
+    AND (
+    	o.clinicianId NOT IN ("6e4f37a7-8c1a-429c-9750-430efbad49bc", "855e577c-90fc-4033-b54b-53a34b9fb65e", "")
+    	OR o.clinicianId IS NULL
+    )
   `);
 
-  const values = [
-    qaOrders.map((order) => {
-      const id = v4();
-      const patient = patients.find(e => e.email === e.email);
+  const [localProductVariants] = await localPool.query(`SELECT * FROM products_variants`)
 
-      order.created_at = new Date(order.created_at);
-      order.updated_at = new Date(order.updated_at);
-      order.patient_id = patient.id;
-      order.shipping_address_id = patient.addressData.id;
-      order.billing_address_id = patient.addressData.id;
+  const orders = [];
+  const prescriptions = [];
 
-      if (order.filled_at) {
-        order.filled_at = new Date(order.filled_at);
-      }
+  for (const item of qaOrders) {
+    const patient = patients.find(e => e.email === e.email);
 
-      if (order.answers_json) {
-        const { results } = order.answers_json;
-        order.document_url = results.find(e => e.question_id === "userDocument")?.value || null;
-      }
+    const order = {
+      id: v4(),
+      order_type: item.order_type,        
+      subscription_type: item.subscription_type, 
+      order_number: item.order_number, 
+      skipVerification: item.skipVerification,
+      reminder: item.reminder,
+      is_nmi: item.is_nmi,
+      is_ehr: item.is_ehr,
+      document_url: item.document_url,
+      created_at: new Date(item.created_at),
+      updated_at: new Date(item.updated_at),
+      platform_order_id: item.platform_order_id,
+      status_code: item.status_code,
+      questionnaire_status_code: item.questionnaire_status_code,
+      answers_json: item.answers_json,
+      filled_at: item.filled_at
+    }
 
-      const oldId = order.id;
-      delete order.id;
-      delete order.answers_json;
-      orders.push({ id, ...order, oldId });
-      return [id, ...Object.values(order)];
-    }),
-  ];
+    order.patient_id = patient.id;
+    order.shipping_address_id = patient.addressData.id;
+    order.billing_address_id = patient.addressData.id;
+
+    if (item.filled_at) {
+      order.filled_at = new Date(item.filled_at);
+    }
+
+    if (item.answers_json) {
+      const { results } = item.answers_json;
+      order.document_url = results.find(e => e.question_id === "userDocument")?.value || null;
+    }
+
+    delete order.answers_json;
+    orders.push(Object.values(order));
+
+    const prescription = {
+      id: v4(),
+      doctor_comments: "item.doctor_comments",
+      is_blocking: item.is_blocking,
+      is_sync_review: item.is_sync_review,
+      ehr_pdf: item.ehr_pdf,
+      hellosign_reques_code: item.hellosign_reques_code,
+      hellosign_signing_url: item.hellosign_signing_url,
+      hellosign_is_completed: item.hellosign_is_completed,
+      hellosign_file_url: item.hellosign_file_url,
+      has_answers: item.has_answers,
+      signed_at: item.signed_at ? new Date(item.signed_at) : null,
+      created_at: order.created_at,
+      updated_at: order.updated_at,
+      order_id: order.id,
+      variant_id: localProductVariants.find(e => e.sku == item.variant_id)?.id || null,
+      doctor_id: item.doctor_id,
+      status_code: item.status_code,
+    }
+    prescriptions.push(Object.values(prescription));
+  }
 
   await localPool.query(
     `INSERT INTO orders (id, order_type, subscription_type, order_number, skip_verification, 
@@ -202,7 +254,15 @@ async function insertOrders() {
       status_code, questionnaire_status_code, questionnaire_fullfiled_at, patient_id,
       shipping_address_id, billing_address_id
     ) VALUES ?`,
-    values
+    [orders]
   );
-  console.log("ORDERS INSERTED");
+
+  await localPool.query(
+    `INSERT INTO prescriptions (id, doctor_comments, is_blocking, is_sync_review, ehr_pdf, 
+      hellosign_request_code, hellosign_signing_url, hellosign_is_completed, hellosign_file_url, 
+      has_answers, signed_at, created_at, updated_at, order_id, variant_id, doctor_id, status_code  
+    ) VALUES ?`,
+    [prescriptions]
+  );
+  console.log("ORDERS AND PRESCRIPTIONS INSERTED");
 }

@@ -168,7 +168,8 @@ async function insertOrdersAndPrescriptions() {
       o.created_at, o.created_at  as updated_at,
       o.variant as variant_id, o.clinicianId as doctor_id, 
       IF (o.status in (8, 0, 1), 1, 
-        IF (o.status = 4, 3, 2)) as status_code  
+        IF (o.status = 4, 3, 2)) as status_code,  
+      IF (o.is_woocommerce, 'woocommerce', 'shopify') as source
     FROM orders o 
     LEFT JOIN (
       SELECT order_id, answers_json, MAX(order_id), filled_at 
@@ -207,7 +208,8 @@ async function insertOrdersAndPrescriptions() {
       status_code: item.status_code,
       questionnaire_status_code: item.questionnaire_status_code,
       answers_json: item.answers_json,
-      filled_at: item.filled_at
+      filled_at: item.filled_at,
+      source: item.source
     }
 
     order.patient_id = patient.id;
@@ -220,7 +222,9 @@ async function insertOrdersAndPrescriptions() {
 
     if (item.answers_json) {
       const { results } = item.answers_json;
-      order.document_url = results.find(e => e.question_id === "userDocument")?.value || null;
+      order.document_url = results.find(e => 
+        e.question_id === "userDocument" || e.question_id === "faceImage"
+      )?.value || null;
     }
 
     delete order.answers_json;
@@ -251,7 +255,7 @@ async function insertOrdersAndPrescriptions() {
   await localPool.query(
     `INSERT INTO orders (id, order_type, subscription_type, order_number, skip_verification, 
       reminder, is_nmi, is_ehr, document_url, created_at, updated_at, platform_order_id,  
-      status_code, questionnaire_status_code, questionnaire_fullfiled_at, patient_id,
+      status_code, questionnaire_status_code, questionnaire_fullfiled_at, source, patient_id,
       shipping_address_id, billing_address_id
     ) VALUES ?`,
     [orders]

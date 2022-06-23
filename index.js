@@ -1,6 +1,7 @@
 const { createPool } = require("mysql2");
 const { v4 } = require("uuid");
-require('dotenv').config();
+require("dotenv").config();
+const questionsData = require("./data-questions");
 
 const qaPool = createPool({
   host: process.env.QA_DATABASE_HOST,
@@ -32,6 +33,7 @@ async function main() {
   await clearDatabase();
   await insertPatientsAndAddresses();
   await insertOrdersAndPrescriptions();
+  await mapAnswers();
 }
 
 async function clearDatabase() {
@@ -104,10 +106,10 @@ async function insertPatientsAndAddresses() {
       city: patient.city,
       created_at: createdAt,
       updated_at: updatedAt,
-      oldId
-    }
+      oldId,
+    };
 
-    addresses.push({...addressData});
+    addresses.push({ ...addressData });
     delete addressData.oldId;
     addressesValues.push(Object.values(addressData));
 
@@ -120,12 +122,12 @@ async function insertPatientsAndAddresses() {
       email: patient.email,
       created_at: createdAt,
       updated_at: updatedAt,
-      oldId
-    }
+      oldId,
+    };
 
-    patients.push({...patientData, addressData});
+    patients.push({ ...patientData, addressData });
     delete patientData.oldId;
-    patientsValues.push(Object.values(patientData))
+    patientsValues.push(Object.values(patientData));
   }
 
   const insertPatientsQuery = `
@@ -140,7 +142,7 @@ async function insertPatientsAndAddresses() {
 
   await Promise.all([
     localPool.query(insertPatientsQuery, [patientsValues]),
-    localPool.query(insertAdressesQuery, [addressesValues])
+    localPool.query(insertAdressesQuery, [addressesValues]),
   ]);
 
   console.log("PATIENTS AND ADDRESSES INSERTED");
@@ -184,19 +186,21 @@ async function insertOrdersAndPrescriptions() {
     )
   `);
 
-  const [localProductVariants] = await localPool.query(`SELECT * FROM products_variants`)
+  const [localProductVariants] = await localPool.query(
+    `SELECT * FROM products_variants`
+  );
 
   const orders = [];
   const prescriptions = [];
 
   for (const item of qaOrders) {
-    const patient = patients.find(e => e.email === e.email);
+    const patient = patients.find((e) => e.email === e.email);
 
     const order = {
       id: v4(),
-      order_type: item.order_type,        
-      subscription_type: item.subscription_type, 
-      order_number: item.order_number, 
+      order_type: item.order_type,
+      subscription_type: item.subscription_type,
+      order_number: item.order_number,
       skipVerification: item.skipVerification,
       reminder: item.reminder,
       is_nmi: item.is_nmi,
@@ -209,8 +213,8 @@ async function insertOrdersAndPrescriptions() {
       questionnaire_status_code: item.questionnaire_status_code,
       answers_json: item.answers_json,
       filled_at: item.filled_at,
-      source: item.source
-    }
+      source: item.source,
+    };
 
     order.patient_id = patient.id;
     order.shipping_address_id = patient.addressData.id;
@@ -222,9 +226,11 @@ async function insertOrdersAndPrescriptions() {
 
     if (item.answers_json) {
       const { results } = item.answers_json;
-      order.document_url = results.find(e => 
-        e.question_id === "userDocument" || e.question_id === "faceImage"
-      )?.value || null;
+      order.document_url =
+        results.find(
+          (e) =>
+            e.question_id === "userDocument" || e.question_id === "faceImage"
+        )?.value || null;
     }
 
     delete order.answers_json;
@@ -245,10 +251,11 @@ async function insertOrdersAndPrescriptions() {
       created_at: order.created_at,
       updated_at: order.updated_at,
       order_id: order.id,
-      variant_id: localProductVariants.find(e => e.sku == item.variant_id)?.id || null,
+      variant_id:
+        localProductVariants.find((e) => e.sku == item.variant_id)?.id || null,
       doctor_id: item.doctor_id,
       status_code: item.status_code,
-    }
+    };
     prescriptions.push(Object.values(prescription));
   }
 
@@ -269,4 +276,88 @@ async function insertOrdersAndPrescriptions() {
     [prescriptions]
   );
   console.log("ORDERS AND PRESCRIPTIONS INSERTED");
+}
+
+async function mapAnswers() {
+  try {
+    const [answers] = await qaPool.query(
+      "SELECT p.email, ans.answers_json, ans.order_id, ans.created_at, ans.filled_at FROM answers AS ans LEFT JOIN patient AS p ON p.id = ans.client_id"
+    );
+    for (const answer of answers) {
+      if (answer.order_id) {
+        const [order] = await localPool.query(
+          `SELECT id FROM orders AS o
+       WHERE o.platform_order_id = '${answer.order_id}'`
+        );
+        if (order.length) {
+          const [prescription] = await localPool.query(
+            `SELECT * FROM prescriptions AS p WHERE p.order_id ='${order[0].id}'`
+          );
+          results = answer.answers_json.results;
+          const excludedIds = [
+            "birthDate",
+            "userDocument",
+            "faceImage",
+            322,
+            323,
+            326,
+            327,
+            328,
+            335,
+            341,
+            358,
+            371,
+            390,
+            405,
+            437,
+            282,
+          ];
+          for (const result of results) {
+            let question = null;
+            if (!excludedIds.includes(result.question_id) && result.value) {
+              const data = questionsData.find((question) =>
+                question.oldIds.includes(result.question_id)
+              );
+              if (data) {
+                question = await localPool.query(
+                  `SELECT * FROM questions AS q WHERE q.code = ${data.code}`
+                );
+              } else {
+                question = await localPool.query(
+                  `SELECT * FROM questions AS q WHERE q.code = 100${result.question_id}`
+                );
+                if (!question[0].length) {
+                  const normalizedQuestion = result.question.replace(/'/g, '"');
+                  await localPool.query(
+                    `INSERT INTO questions (id,question, code, question_type_id) VALUES('${v4()}','${normalizedQuestion}', 100${
+                      result.question_id
+                    }, '8630d110-23fd-4065-98bf-196874ef7701')`
+                  );
+                  question = await localPool.query(
+                    `SELECT * FROM questions AS q WHERE q.code = 100${result.question_id}`
+                  );
+                }
+              }
+              await localPool.query(
+                `INSERT INTO answers (id, response, sort, created_at, updated_at, prescription_id, question_id)
+              VALUES (?,?,?,?,?,?,?)`,
+                [
+                  v4(),
+                  result.value,
+                  100,
+                  new Date(answer.created_at),
+                  new Date(answer.filled_at || answer.created_at),
+                  prescription[0].id,
+                  question[0][0].id,
+                ]
+              );
+            }
+          }
+        }
+      }
+    }
+    console.log("Answers Done");
+  } catch (e) {
+    console.log(e);
+  }
 }

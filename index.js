@@ -34,6 +34,7 @@ async function main() {
   await insertPatientsAndAddresses();
   await insertOrdersAndPrescriptions();
   await mapAnswers();
+  //await updateExpiredOrders();
 }
 
 async function clearDatabase() {
@@ -157,8 +158,16 @@ async function insertOrdersAndPrescriptions() {
       null as document_url,
       o.created_at, o.created_at as updated_at, 
       o.platform_order_id, 
-      IF(o.status IN (0, 8), 1, o.status) as status_code,
-      IF(o.status IN (4, 1), 2, 1) as questionnaire_status_code,
+      IF(o.financial_status = "authorized", 1, 
+        IF(o.financial_status = "paid", 3, 
+          IF (o.financial_status = "partially_refunded", 2, 4)
+        )
+      ) as status_code,
+      IF(o.status IN (1, 3), 2, 
+        IF (o.status = 0, 1, 
+            IF (o.status = 4 AND o.prescription_status = 'pending', 1, 2 )
+        )
+      ) as questionnaire_status_code,
       a.answers_json, a.filled_at,
       o.commentClinician as doctor_comments,
       0 as is_blocking, o.is_sync_review, o.ehr_pdf,
@@ -166,23 +175,32 @@ async function insertOrdersAndPrescriptions() {
       o.signing_url as hellosign_signing_url,
       IF(o.fulfillment_status = 'fulfilled', 1, 0) as hellosign_is_completed,
       o.files_url as hellosign_file_url,
-      IF(a.filled_at is null, 1, 0) as has_answers, o.signed_at,
+      0 as has_answers, o.signed_at,
       o.created_at, o.created_at  as updated_at,
       o.variant as variant_id, o.clinicianId as doctor_id, 
-      IF (o.status in (8, 0, 1), 1, 
-        IF (o.status = 4, 3, 2)) as status_code,  
+      IF (p.hasQuestionnaire is null or p.hasQuestionnaire is false, 5, 
+        IF (o.prescription_status in ('accepted', 'approved'), 2, 
+          IF (o.prescription_status in ('denied', 'rejected', 'voided'), 3, 
+            IF (o.prescription_status = 'pending', 1, 6)
+          )
+        )  
+      ) as prescription_status_code,
       IF (o.is_woocommerce, 'woocommerce', 'shopify') as source
     FROM orders o 
     LEFT JOIN (
       SELECT order_id, answers_json, MAX(order_id), filled_at 
       FROM answers
+      WHERE a.answers_json LIKE '%userDocument%' 
+      OR a.answers_json LIKE '%faceImage%'
       GROUP BY order_id
     ) a
     ON a.order_id  = o.platform_order_id
+    LEFT JOIN products p 
+    ON p.id = o.product 
     WHERE o.status NOT IN (10, 12)
     AND (
-    	o.clinicianId NOT IN ("6e4f37a7-8c1a-429c-9750-430efbad49bc", "855e577c-90fc-4033-b54b-53a34b9fb65e", "")
-    	OR o.clinicianId IS NULL
+      o.clinicianId NOT IN ("6e4f37a7-8c1a-429c-9750-430efbad49bc", "855e577c-90fc-4033-b54b-53a34b9fb65e", "")
+      OR o.clinicianId IS NULL
     )
   `);
 
@@ -238,7 +256,7 @@ async function insertOrdersAndPrescriptions() {
 
     const prescription = {
       id: v4(),
-      doctor_comments: "item.doctor_comments",
+      doctor_comments: item.doctor_comments,
       is_blocking: item.is_blocking,
       is_sync_review: item.is_sync_review,
       ehr_pdf: item.ehr_pdf,
@@ -254,7 +272,7 @@ async function insertOrdersAndPrescriptions() {
       variant_id:
         localProductVariants.find((e) => e.sku == item.variant_id)?.id || null,
       doctor_id: item.doctor_id,
-      status_code: item.status_code,
+      status_code: item.prescription_status_code,
     };
     prescriptions.push(Object.values(prescription));
   }
@@ -293,6 +311,10 @@ async function mapAnswers() {
           const [prescription] = await localPool.query(
             `SELECT * FROM prescriptions AS p WHERE p.order_id ='${order[0].id}'`
           );
+          await localPool.query(`UPDATE prescriptions
+            SET has_answers=1
+            WHERE id='${prescription[0].id}';`
+          )
           results = answer.answers_json.results;
           const excludedIds = [
             "birthDate",
@@ -360,4 +382,14 @@ async function mapAnswers() {
   } catch (e) {
     console.log(e);
   }
+}
+
+async function updateExpiredOrders() {
+  await localPool.query(`
+    UPDATE orders o 
+    SET o.status_code = 5
+    WHERE o.status_code = 1
+    AND  DATEDIFF(now(), o.created_at) >= 30`
+  );
+  console.log("Orders Updated");
 }

@@ -34,7 +34,7 @@ async function main() {
   await insertPatientsAndAddresses();
   await insertOrdersAndPrescriptions();
   await mapAnswers();
-  //await updateExpiredOrders();
+  await updateExpiredOrders();
 }
 
 async function clearDatabase() {
@@ -313,8 +313,7 @@ async function mapAnswers() {
           );
           await localPool.query(`UPDATE prescriptions
             SET has_answers=1
-            WHERE id='${prescription[0].id}';`
-          )
+            WHERE id='${prescription[0].id}';`);
           results = answer.answers_json.results;
           const excludedIds = [
             "birthDate",
@@ -385,11 +384,9 @@ async function mapAnswers() {
 }
 
 async function updateExpiredOrders() {
-  await localPool.query(`
-    UPDATE orders o 
-    SET o.status_code = 5
-    WHERE o.status_code = 1
-    AND  DATEDIFF(now(), o.created_at) >= 30`
-  );
+  await localPool.query(`UPDATE orders AS o
+  INNER JOIN prescriptions AS p  ON p.order_id = o.id  
+  SET o.status_code = 5, p.status_code = 4
+  WHERE o.status_code = 1 AND  DATEDIFF(now(), o.created_at) >= 30`);
   console.log("Orders Updated");
 }

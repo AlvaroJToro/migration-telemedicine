@@ -189,7 +189,7 @@ async function insertOrdersAndPrescriptions() {
     FROM orders o 
     LEFT JOIN (
       SELECT order_id, answers_json, MAX(order_id), filled_at 
-      FROM answers
+      FROM answers AS a
       WHERE a.answers_json LIKE '%userDocument%' 
       OR a.answers_json LIKE '%faceImage%'
       GROUP BY order_id
